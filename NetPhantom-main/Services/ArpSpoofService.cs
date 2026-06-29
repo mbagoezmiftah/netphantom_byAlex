@@ -17,6 +17,11 @@ public class ArpSpoofService : IDisposable
     private Task? _spoofTask;
     private bool _disposed;
 
+    private string _lastLocalMac = string.Empty;
+    private string _lastTargetIp = string.Empty;
+    private string _lastTargetMac = string.Empty;
+    private string _lastGatewayIp = string.Empty;
+
     public int PacketsSent { get; private set; }
     public DateTime? LastSentAt { get; private set; }
     public event EventHandler<string>? LogMessage;
@@ -28,6 +33,12 @@ public class ArpSpoofService : IDisposable
         if (_spoofTask is { IsCompleted: false })
             throw new InvalidOperationException("Spoofer already running.");
         PacketsSent = 0;
+
+        _lastLocalMac = localMac;
+        _lastTargetIp = targetIp;
+        _lastTargetMac = targetMac;
+        _lastGatewayIp = gatewayIp;
+        
         _cts = new CancellationTokenSource();
         var ct = _cts.Token;
         _device.Open(DeviceModes.Promiscuous);
@@ -52,12 +63,32 @@ public class ArpSpoofService : IDisposable
     }
 
     public async Task StopAsync()
+{
+    _cts?.Cancel();
+    if (_spoofTask != null) await _spoofTask.ConfigureAwait(false);
+    try
     {
-        _cts?.Cancel();
-        if (_spoofTask != null) await _spoofTask.ConfigureAwait(false);
-        try { _device.Close(); } catch { }
-        LogMessage?.Invoke(this, $"Stopped. Total packets sent: {PacketsSent}");
+        // Kirim ARP restore — kembalikan MAC asli ke target dan gateway
+        if (!string.IsNullOrEmpty(_lastLocalMac) &&
+            !string.IsNullOrEmpty(_lastTargetIp) &&
+            !string.IsNullOrEmpty(_lastTargetMac) &&
+            !string.IsNullOrEmpty(_lastGatewayIp))
+        {
+            for (int i = 0; i < 3; i++)
+            {
+                SendArpReply(_device, _lastTargetMac, _lastGatewayIp,
+                             _lastTargetIp, _lastTargetMac);
+                SendArpReply(_device, _lastLocalMac, _lastTargetIp,
+                             _lastGatewayIp, "FF:FF:FF:FF:FF:FF");
+                await Task.Delay(100).ConfigureAwait(false);
+            }
+            LogMessage?.Invoke(this, "ARP cache restored.");
+        }
+        _device.Close();
     }
+    catch { }
+    LogMessage?.Invoke(this, $"Stopped. Total packets sent: {PacketsSent}");
+}
 
     private static void SendArpReply(ILiveDevice device, string senderMac, string senderIp, string targetIp, string targetMac)
     {
